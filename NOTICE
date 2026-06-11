@@ -1,0 +1,11 @@
+sound-model-preprocess
+Copyright 2026 The sound-model-preprocess Authors
+
+This product includes software developed as part of the sound-model-preprocess
+project (licensed under the Apache License, Version 2.0).
+
+Optional third-party backends (not included in this repository; separate
+licenses apply when you enable and link them):
+
+  - CMSIS-DSP (ARM) — see ARM CMSIS license terms
+  - esp-dsp (Espressif) — see Espressif esp-dsp license terms

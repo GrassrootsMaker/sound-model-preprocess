@@ -1,0 +1,20 @@
+# Local build outputs (prebuilt/ is committed — see features/prebuilt/README.md)
+features/build/
+features/build-armv7/
+features/build-cmake/
+*.o
+*.a
+host_demo
+test_sound_features
+
+# Ignore stray libs outside prebuilt/
+*.dylib
+*.so
+*.dll
+!features/prebuilt/**/*
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

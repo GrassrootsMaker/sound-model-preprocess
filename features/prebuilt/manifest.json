@@ -1,0 +1,13 @@
+{
+  "library": "sound_features",
+  "version": "1.0.0",
+  "fft_backend": "builtin",
+  "platforms": {
+    "darwin-arm64": {
+      "file": "libsound_features.dylib",
+      "os": "macOS",
+      "arch": "arm64"
+    }
+  },
+  "notes": "Prebuilt host libraries for PC training tools. Rebuild with features/package_prebuilt.sh and commit when sources change."
+}

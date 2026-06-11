@@ -1,0 +1,63 @@
+cmake_minimum_required(VERSION 3.14)
+project(sound_features C)
+
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# FFT backend: builtin (default), cmsis, esp, neon
+set(SF_FFT_BACKEND "builtin" CACHE STRING "FFT backend: builtin, cmsis, esp, neon")
+set_property(CACHE SF_FFT_BACKEND PROPERTY STRINGS builtin cmsis esp neon)
+
+set(SF_ARM_NEON_FLAGS "-march=armv7-a" "-mfpu=neon-vfpv4" "-mfloat-abi=hard" CACHE STRING "ARMv7 NEON compiler flags (RV1106)")
+
+set(SF_SOURCES src/sound_features.c)
+
+if(SF_FFT_BACKEND STREQUAL "cmsis")
+    list(APPEND SF_SOURCES src/sf_fft_cmsis.c)
+    if(NOT CMSIS_DSP_INCLUDE)
+        message(FATAL_ERROR "Set -DCMSIS_DSP_INCLUDE=path/to/CMSIS-DSP/Include")
+    endif()
+    if(CMSIS_DSP_LIB)
+        set(SF_FFT_LIBS ${CMSIS_DSP_LIB})
+    endif()
+elseif(SF_FFT_BACKEND STREQUAL "esp")
+    list(APPEND SF_SOURCES src/sf_fft_esp.c)
+    if(ESP_DSP_INCLUDE)
+        include_directories(${ESP_DSP_INCLUDE})
+    endif()
+    if(ESP_DSP_LIB)
+        set(SF_FFT_LIBS ${ESP_DSP_LIB})
+    endif()
+elseif(SF_FFT_BACKEND STREQUAL "neon")
+    list(APPEND SF_SOURCES src/sf_fft_neon.c)
+else()
+    list(APPEND SF_SOURCES src/sf_fft_builtin.c)
+endif()
+
+message(STATUS "sound_features FFT backend: ${SF_FFT_BACKEND}")
+
+function(sf_apply_target_options target_name)
+    target_include_directories(${target_name} PUBLIC include)
+    target_link_libraries(${target_name} PUBLIC m ${SF_FFT_LIBS})
+    if(SF_FFT_BACKEND STREQUAL "cmsis")
+        target_compile_definitions(${target_name} PRIVATE SF_FFT_CMSIS)
+        target_include_directories(${target_name} PRIVATE ${CMSIS_DSP_INCLUDE})
+    elseif(SF_FFT_BACKEND STREQUAL "esp")
+        target_compile_definitions(${target_name} PRIVATE SF_FFT_ESP_DSP)
+    elseif(SF_FFT_BACKEND STREQUAL "neon")
+        target_compile_definitions(${target_name} PRIVATE SF_USE_NEON)
+        target_compile_options(${target_name} PRIVATE ${SF_ARM_NEON_FLAGS})
+    endif()
+endfunction()
+
+add_library(sound_features STATIC ${SF_SOURCES})
+sf_apply_target_options(sound_features)
+
+add_library(sound_features_shared SHARED ${SF_SOURCES})
+set_target_properties(sound_features_shared PROPERTIES OUTPUT_NAME sound_features)
+sf_apply_target_options(sound_features_shared)
+
+enable_testing()
+add_executable(test_sound_features tests/test_sound_features.c)
+target_link_libraries(test_sound_features PRIVATE sound_features m ${SF_FFT_LIBS})
+add_test(NAME sound_features COMMAND test_sound_features)
