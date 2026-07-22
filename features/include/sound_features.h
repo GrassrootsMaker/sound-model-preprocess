@@ -65,6 +65,12 @@ int sf_config_validate(const sf_config_t *cfg);
  */
 size_t sf_context_buffer_bytes(const sf_config_t *cfg);
 
+/**
+ * When SF_EMBEDDED is defined at compile time, sf_context_buffer_bytes() omits
+ * the full-duration float waveform buffer (~192 KB for 3 s @ 16 kHz). Use
+ * sf_compute_log_mel_pcm16() instead of sf_compute_log_mel().
+ */
+
 /** Initialize context buffers; caller must zero-initialize *ctx first. */
 int sf_context_init(sf_context_t *ctx, const sf_config_t *cfg, void *buffer, size_t buffer_bytes);
 
@@ -82,6 +88,17 @@ int sf_compute_log_mel(
     sf_context_t *ctx,
     const float *waveform,
     int n_waveform_samples,
+    float *mel_out
+);
+
+/**
+ * Log-mel from int16 PCM without a full float waveform buffer (SF_EMBEDDED).
+ * Pad/trim is applied per STFT frame on the fly.
+ */
+int sf_compute_log_mel_pcm16(
+    sf_context_t *ctx,
+    const int16_t *pcm,
+    int n_pcm_samples,
     float *mel_out
 );
 
@@ -111,6 +128,19 @@ void sf_pack_model_input(
     float *model_input
 );
 
+/** Pack [mels][frames] -> [frames][mels], z-score normalize, quantize to int8. */
+void sf_pack_normalize_quantize_int8(
+    const float *mel,
+    int n_mels,
+    int n_frames,
+    int target_frames,
+    int8_t *model_input,
+    float mean,
+    float std,
+    float scale,
+    int zero_point
+);
+
 /** Quantize float tensor to int8 for TFLite input. */
 void sf_quantize_int8(
     const float *src,
@@ -128,6 +158,19 @@ int sf_argmax_float(const float *values, int n, float *confidence_out);
 
 /** Argmax on dequantized int8 logits with optional softmax confidence. */
 int sf_argmax_int8(
+    const int8_t *values,
+    int n,
+    float scale,
+    int zero_point,
+    float *confidence_out
+);
+
+/**
+ * Argmax for models whose final layer is already Softmax (output tensor holds
+ * probabilities). Confidence = dequantized max probability directly, WITHOUT
+ * re-applying softmax (which would wrongly squash a confident 0.9 down to ~0.4).
+ */
+int sf_argmax_int8_prob(
     const int8_t *values,
     int n,
     float scale,

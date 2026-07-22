@@ -12,9 +12,13 @@ size_t sound_pipeline_buffer_bytes(const sound_model_params_t *params) {
     const int frames = params ? params->input_frames : 0;
     const int mels = params ? params->input_mels : 0;
     const size_t mel_bytes = (size_t)mels * (size_t)frames * sizeof(float);
+#ifdef SF_EMBEDDED
+    return mel_bytes;
+#else
     const size_t float_bytes = mel_bytes;
     const size_t int8_bytes = mel_bytes;
     return mel_bytes + float_bytes + int8_bytes;
+#endif
 }
 
 static void *align_ptr(void *ptr, size_t alignment) {
@@ -70,10 +74,15 @@ int sound_pipeline_init(
     pipe->mel_buf = (float *)cursor;
     cursor += (size_t)params->input_mels * (size_t)params->input_frames * sizeof(float);
 
+#ifndef SF_EMBEDDED
     pipe->model_float_buf = (float *)cursor;
     cursor += (size_t)params->input_mels * (size_t)params->input_frames * sizeof(float);
 
     pipe->model_int8_buf = (int8_t *)cursor;
+#else
+    pipe->model_float_buf = NULL;
+    pipe->model_int8_buf = NULL;
+#endif
     return 0;
 }
 
@@ -149,11 +158,38 @@ int sound_pipeline_pcm16_to_input(
     int8_t *tflite_input,
     int tflite_input_bytes
 ) {
-    float *pcm_f;
+    const sound_model_params_t *p = &pipe->params;
+    const int needed = p->input_frames * p->input_mels;
+    int err;
 
-    if (!pipe || !pcm) {
+    if (!pipe || !pcm || !tflite_input) {
         return SF_ERR_NULL_PTR;
     }
+    if (tflite_input_bytes < needed) {
+        return SP_ERR_SIZE;
+    }
+
+#ifdef SF_EMBEDDED
+    err = sf_compute_log_mel_pcm16(&pipe->feature_ctx, pcm, n_pcm, pipe->mel_buf);
+    if (err < 0) {
+        return err;
+    }
+
+    sf_pack_normalize_quantize_int8(
+        pipe->mel_buf,
+        p->input_mels,
+        pipe->feature_ctx.n_frames,
+        p->input_frames,
+        tflite_input,
+        p->norm_mean,
+        p->norm_std,
+        p->input_scale,
+        p->input_zero_point
+    );
+    return needed;
+#else
+    float *pcm_f;
+
     if (!pipe->feature_ctx.waveform_buf) {
         return SF_ERR_INVALID_CONFIG;
     }
@@ -167,6 +203,7 @@ int sound_pipeline_pcm16_to_input(
         tflite_input,
         tflite_input_bytes
     );
+#endif
 }
 
 int sound_pipeline_decode_output(
@@ -183,7 +220,11 @@ int sound_pipeline_decode_output(
         return SP_ERR_SIZE;
     }
 
-    *label_index = sf_argmax_int8(
+    /* Model ends in Softmax, so the output tensor already holds probabilities.
+     * Use max-probability confidence directly (do NOT re-softmax, which would
+     * squash a confident ~0.9 down to ~0.4 and trip the confidence gate).
+     */
+    *label_index = sf_argmax_int8_prob(
         tflite_output,
         params->num_labels,
         params->output_scale,

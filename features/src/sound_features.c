@@ -202,12 +202,15 @@ size_t sf_context_buffer_bytes(const sf_config_t *cfg) {
 
     bytes += (size_t)cfg->n_mels * (size_t)n_freq_bins * sizeof(float);
     bytes += (size_t)cfg->n_fft * sizeof(float);
+#ifndef SF_EMBEDDED
     bytes += (size_t)n_samples * sizeof(float);
+#endif
     bytes += (size_t)cfg->n_fft * sizeof(float);
     bytes += sizeof(float) - 1U; /* align before fft_work */
     bytes += sf_fft_work_bytes(cfg->n_fft);
     bytes += (size_t)n_freq_bins * sizeof(float);
   (void)n_frames;
+    (void)n_samples; /* unused when SF_EMBEDDED drops the waveform buffer */
     return bytes;
 }
 
@@ -248,8 +251,12 @@ int sf_context_init(sf_context_t *ctx, const sf_config_t *cfg, void *buffer, siz
     ctx->hann_window = (float *)cursor;
     cursor += (size_t)cfg->n_fft * sizeof(float);
 
+#ifndef SF_EMBEDDED
     ctx->waveform_buf = (float *)cursor;
     cursor += (size_t)ctx->n_samples * sizeof(float);
+#else
+    ctx->waveform_buf = NULL;
+#endif
 
     ctx->frame_buf = (float *)cursor;
     cursor += (size_t)cfg->n_fft * sizeof(float);
@@ -347,6 +354,107 @@ int sf_compute_log_mel(
     return ctx->n_frames;
 }
 
+static float padded_pcm16_sample(
+    const int16_t *pcm,
+    int n_pcm,
+    int n_out,
+    int idx
+) {
+    if (!pcm || idx < 0 || idx >= n_out) {
+        return 0.0f;
+    }
+    if (n_pcm >= n_out) {
+        const int start = (n_pcm - n_out) / 2;
+        return (float)pcm[start + idx] / 32768.0f;
+    }
+
+    {
+        const int pad_left = (n_out - n_pcm) / 2;
+        if (idx < pad_left || idx >= pad_left + n_pcm) {
+            return 0.0f;
+        }
+        return (float)pcm[idx - pad_left] / 32768.0f;
+    }
+}
+
+int sf_compute_log_mel_pcm16(
+    sf_context_t *ctx,
+    const int16_t *pcm,
+    int n_pcm_samples,
+    float *mel_out
+) {
+    int frame;
+    float max_power;
+    const int n_mels = ctx->cfg.n_mels;
+    const int n_fft = ctx->cfg.n_fft;
+    const int hop = ctx->cfg.hop_length;
+    const int n_freq_bins = ctx->n_freq_bins;
+
+    if (!ctx || !mel_out) {
+        return SF_ERR_NULL_PTR;
+    }
+    if (sf_config_validate(&ctx->cfg) != 0) {
+        return SF_ERR_INVALID_CONFIG;
+    }
+
+    memset(mel_out, 0, (size_t)n_mels * (size_t)ctx->n_frames * sizeof(float));
+
+    for (frame = 0; frame < ctx->n_frames; ++frame) {
+        const int offset = frame * hop;
+        int mel;
+        int i;
+
+        for (i = 0; i < n_fft; ++i) {
+            ctx->frame_buf[i] = padded_pcm16_sample(
+                pcm,
+                n_pcm_samples,
+                ctx->n_samples,
+                offset + i
+            );
+        }
+        sf_neon_mul_f32(ctx->frame_buf, ctx->hann_window, ctx->frame_buf, n_fft);
+        sf_fft_power_spectrum(
+            ctx->fft_work,
+            ctx->frame_buf,
+            n_fft,
+            n_freq_bins,
+            ctx->power_spec
+        );
+
+        for (mel = 0; mel < n_mels; ++mel) {
+            const float *weights = ctx->mel_filters + mel * n_freq_bins;
+            mel_out[mel * ctx->n_frames + frame] = sf_neon_dot_f32(
+                weights,
+                ctx->power_spec,
+                n_freq_bins
+            );
+        }
+    }
+
+    max_power = 0.0f;
+    for (frame = 0; frame < n_mels * ctx->n_frames; ++frame) {
+        if (mel_out[frame] > max_power) {
+            max_power = mel_out[frame];
+        }
+    }
+    if (max_power < SF_AMIN) {
+        max_power = SF_AMIN;
+    }
+
+    {
+        const float ref_db = 10.0f * log10f(max_power);
+        for (frame = 0; frame < n_mels * ctx->n_frames; ++frame) {
+            float value = mel_out[frame];
+            if (value < SF_AMIN) {
+                value = SF_AMIN;
+            }
+            mel_out[frame] = 10.0f * log10f(value) - ref_db;
+        }
+    }
+
+    return ctx->n_frames;
+}
+
 void sf_pcm16_to_float(const int16_t *pcm, int n_samples, float *out) {
     int i;
     if (!out) {
@@ -360,6 +468,44 @@ void sf_pcm16_to_float(const int16_t *pcm, int n_samples, float *out) {
     }
     for (i = 0; i < n_samples; ++i) {
         out[i] = (float)pcm[i] / 32768.0f;
+    }
+}
+
+void sf_pack_normalize_quantize_int8(
+    const float *mel,
+    int n_mels,
+    int n_frames,
+    int target_frames,
+    int8_t *model_input,
+    float mean,
+    float std,
+    float scale,
+    int zero_point
+) {
+    int t;
+    int m;
+    const int copy_frames = n_frames < target_frames ? n_frames : target_frames;
+    const float inv_std = std > 0.0f ? (1.0f / std) : 1.0f;
+    const float inv_scale = scale > 0.0f ? (1.0f / scale) : 1.0f;
+
+    if (!model_input || n_mels <= 0 || target_frames <= 0) {
+        return;
+    }
+    memset(model_input, 0, (size_t)target_frames * (size_t)n_mels);
+    if (!mel || n_frames <= 0) {
+        return;
+    }
+    for (t = 0; t < copy_frames; ++t) {
+        for (m = 0; m < n_mels; ++m) {
+            float v = (mel[m * n_frames + t] - mean) * inv_std;
+            int q = (int)lroundf(v * inv_scale) + zero_point;
+            if (q < -128) {
+                q = -128;
+            } else if (q > 127) {
+                q = 127;
+            }
+            model_input[t * n_mels + m] = (int8_t)q;
+        }
     }
 }
 
@@ -490,4 +636,40 @@ int sf_argmax_int8(
         stack_buf[i] = sf_dequantize_int8(values[i], scale, zero_point);
     }
     return argmax_with_softmax(stack_buf, n, confidence_out);
+}
+
+int sf_argmax_int8_prob(
+    const int8_t *values,
+    int n,
+    float scale,
+    int zero_point,
+    float *confidence_out
+) {
+    int i;
+    int best = 0;
+    float best_v;
+
+    if (!values || n <= 0) {
+        return -1;
+    }
+
+    best_v = sf_dequantize_int8(values[0], scale, zero_point);
+    for (i = 1; i < n; ++i) {
+        const float v = sf_dequantize_int8(values[i], scale, zero_point);
+        if (v > best_v) {
+            best_v = v;
+            best = i;
+        }
+    }
+
+    if (confidence_out) {
+        /* Output is already a softmax probability; clamp to [0, 1]. */
+        if (best_v < 0.0f) {
+            best_v = 0.0f;
+        } else if (best_v > 1.0f) {
+            best_v = 1.0f;
+        }
+        *confidence_out = best_v;
+    }
+    return best;
 }
