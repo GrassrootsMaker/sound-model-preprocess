@@ -1,15 +1,28 @@
 #!/usr/bin/env bash
-# Build shared library for Python on the host (macOS / Linux).
+# Build shared library for Python on the host (macOS / Linux / Windows).
 # Optional: SF_FFT_BACKEND=builtin|cmsis|esp|neon (default: builtin)
+# Windows: run from Git Bash / MSYS2 / w64devkit with gcc in PATH.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${ROOT}/build"
 mkdir -p "${BUILD_DIR}"
 
-CC="${CC:-cc}"
+if [[ -z "${CC:-}" ]]; then
+  if command -v cc >/dev/null 2>&1; then
+    CC=cc
+  elif command -v gcc >/dev/null 2>&1; then
+    CC=gcc
+  elif command -v clang >/dev/null 2>&1; then
+    CC=clang
+  else
+    echo "No C compiler found (cc/gcc/clang). On Windows install w64devkit or MSYS2 MinGW." >&2
+    exit 1
+  fi
+fi
+
 SF_FFT_BACKEND="${SF_FFT_BACKEND:-builtin}"
-CFLAGS="-O2 -std=c99 -fPIC -Wall -Wextra -I${ROOT}/include"
+CFLAGS="-O2 -std=c99 -Wall -Wextra -I${ROOT}/include"
 SRC_CORE="${ROOT}/src/sound_features.c"
 
 case "${SF_FFT_BACKEND}" in
@@ -51,19 +64,33 @@ case "${SF_FFT_BACKEND}" in
 esac
 
 echo "FFT backend: ${SF_FFT_BACKEND}"
+echo "Compiler: ${CC}"
 
-OS="$(uname -s)"
+OS="$(uname -s 2>/dev/null || echo "${OS:-unknown}")"
 case "${OS}" in
   Darwin)
+    CFLAGS="${CFLAGS} -fPIC"
     OUT="${BUILD_DIR}/libsound_features.dylib"
     "${CC}" ${CFLAGS} -dynamiclib "${SRC_CORE}" "${FFT_SRC}" -o "${OUT}" -lm ${LDFLAGS:-}
+    TEST_BIN="${BUILD_DIR}/test_sound_features"
+    DEMO_BIN="${BUILD_DIR}/host_demo"
     ;;
   Linux)
+    CFLAGS="${CFLAGS} -fPIC"
     OUT="${BUILD_DIR}/libsound_features.so"
     "${CC}" ${CFLAGS} -shared "${SRC_CORE}" "${FFT_SRC}" -o "${OUT}" -lm ${LDFLAGS:-}
+    TEST_BIN="${BUILD_DIR}/test_sound_features"
+    DEMO_BIN="${BUILD_DIR}/host_demo"
+    ;;
+  Windows_NT|MINGW*|MSYS*|CYGWIN*)
+    OUT="${BUILD_DIR}/libsound_features.dll"
+    "${CC}" ${CFLAGS} -shared "${SRC_CORE}" "${FFT_SRC}" -o "${OUT}" -lm ${LDFLAGS:-}
+    TEST_BIN="${BUILD_DIR}/test_sound_features.exe"
+    DEMO_BIN="${BUILD_DIR}/host_demo.exe"
     ;;
   *)
     echo "Unsupported OS: ${OS}. Use CMake or compile manually." >&2
+    echo "Hint (Windows MinGW): gcc -O2 -std=c99 -Iinclude -shared src/sound_features.c src/sf_fft_builtin.c -o build/libsound_features.dll -lm" >&2
     exit 1
     ;;
 esac
@@ -72,8 +99,8 @@ echo "Built ${OUT}"
 
 "${CC}" -O2 -std=c99 -Wall -Wextra -I"${ROOT}/include" \
   "${ROOT}/tests/test_sound_features.c" "${SRC_CORE}" "${FFT_SRC}" \
-  -o "${BUILD_DIR}/test_sound_features" -lm ${LDFLAGS:-}
-"${BUILD_DIR}/test_sound_features"
+  -o "${TEST_BIN}" -lm ${LDFLAGS:-}
+"${TEST_BIN}"
 echo "C tests passed."
 
 HOST_DEMO="${ROOT}/../examples/host_demo.c"
@@ -82,7 +109,7 @@ if [[ -f "${HOST_DEMO}" ]]; then
   "${CC}" -O2 -std=c99 -Wall -Wextra \
     -I"${ROOT}/include" -I"${ROOT}/../pipeline/include" \
     "${HOST_DEMO}" "${PIPELINE_SRC}" "${SRC_CORE}" "${FFT_SRC}" \
-    -o "${BUILD_DIR}/host_demo" -lm ${LDFLAGS:-}
-  "${BUILD_DIR}/host_demo"
+    -o "${DEMO_BIN}" -lm ${LDFLAGS:-}
+  "${DEMO_BIN}"
   echo "host_demo passed."
 fi

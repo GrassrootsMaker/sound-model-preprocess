@@ -7,8 +7,8 @@ cd "${ROOT}"
 
 platform_id() {
   local os arch
-  os="$(uname -s)"
-  arch="$(uname -m)"
+  os="$(uname -s 2>/dev/null || echo "${OS:-unknown}")"
+  arch="$(uname -m 2>/dev/null || echo x86_64)"
   case "${os}" in
     Darwin)
       case "${arch}" in
@@ -24,6 +24,9 @@ platform_id() {
         armv7l|armv6l) echo "linux-armv7" ;;
         *) echo "unsupported-linux-${arch}" >&2; return 1 ;;
       esac
+      ;;
+    Windows_NT|MINGW*|MSYS*|CYGWIN*)
+      echo "windows-x86_64"
       ;;
     *)
       echo "Unsupported OS: ${os}" >&2
@@ -42,6 +45,9 @@ case "${TARGET_PLATFORM}" in
     ;;
   linux-*)
     LIB_NAME="libsound_features.so"
+    ;;
+  windows-*)
+    LIB_NAME="libsound_features.dll"
     ;;
   *)
     echo "Unknown platform id: ${TARGET_PLATFORM}" >&2
