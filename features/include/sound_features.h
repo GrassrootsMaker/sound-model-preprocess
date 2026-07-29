@@ -117,6 +117,22 @@ void sf_normalize_mel(float *mel, int n_elements, float mean, float std);
 void sf_pcm16_to_float(const int16_t *pcm, int n_samples, float *out);
 
 /**
+ * Peak amplitude of int16 PCM in [0, 1] (= max|sample| / 32768).
+ * Used as a shared activity gate for training and on-device inference.
+ */
+float sf_pcm16_peak(const int16_t *pcm, int n_samples);
+
+/** Peak amplitude of float samples in [0, 1] (= max|sample|). */
+float sf_float_peak(const float *samples, int n_samples);
+
+/**
+ * 1 if the clip is loud enough to run CNN / keep as a training window.
+ * min_peak <= 0 disables the gate (always active). NULL/empty -> inactive.
+ */
+int sf_pcm16_is_active(const int16_t *pcm, int n_samples, float min_peak);
+int sf_float_is_active(const float *samples, int n_samples, float min_peak);
+
+/**
  * Layout transform: mel[m][t] -> model[t][m] (time-major, no channel dim).
  * Output length = target_frames * n_mels; extra frames are zero-padded.
  */

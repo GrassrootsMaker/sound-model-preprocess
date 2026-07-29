@@ -471,6 +471,65 @@ void sf_pcm16_to_float(const int16_t *pcm, int n_samples, float *out) {
     }
 }
 
+float sf_pcm16_peak(const int16_t *pcm, int n_samples) {
+    int i;
+    int16_t peak = 0;
+
+    if (!pcm || n_samples <= 0) {
+        return 0.0f;
+    }
+    for (i = 0; i < n_samples; ++i) {
+        int16_t v = pcm[i];
+        if (v < 0) {
+            /* Avoid UB on INT16_MIN: -(-32768) does not fit in int16_t. */
+            v = (int16_t)((v == (int16_t)-32768) ? 32767 : -v);
+        }
+        if (v > peak) {
+            peak = v;
+        }
+    }
+    return (float)peak / 32768.0f;
+}
+
+float sf_float_peak(const float *samples, int n_samples) {
+    int i;
+    float peak = 0.0f;
+
+    if (!samples || n_samples <= 0) {
+        return 0.0f;
+    }
+    for (i = 0; i < n_samples; ++i) {
+        float v = samples[i];
+        if (v < 0.0f) {
+            v = -v;
+        }
+        if (v > peak) {
+            peak = v;
+        }
+    }
+    return peak;
+}
+
+int sf_pcm16_is_active(const int16_t *pcm, int n_samples, float min_peak) {
+    if (min_peak <= 0.0f) {
+        return 1;
+    }
+    if (!pcm || n_samples <= 0) {
+        return 0;
+    }
+    return sf_pcm16_peak(pcm, n_samples) >= min_peak ? 1 : 0;
+}
+
+int sf_float_is_active(const float *samples, int n_samples, float min_peak) {
+    if (min_peak <= 0.0f) {
+        return 1;
+    }
+    if (!samples || n_samples <= 0) {
+        return 0;
+    }
+    return sf_float_peak(samples, n_samples) >= min_peak ? 1 : 0;
+}
+
 void sf_pack_normalize_quantize_int8(
     const float *mel,
     int n_mels,
