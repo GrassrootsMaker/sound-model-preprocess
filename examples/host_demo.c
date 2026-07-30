@@ -35,6 +35,9 @@ static sound_model_params_t demo_params(void) {
     p.output_scale = 0.1f;
     p.output_zero_point = 0;
     p.num_labels = 2;
+    p.num_target_labels = 0;
+    p.output_dim = 2;
+    p.is_target_threshold = 0.0f;
     return p;
 }
 

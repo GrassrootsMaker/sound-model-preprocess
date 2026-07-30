@@ -27,7 +27,18 @@ typedef struct {
     int input_zero_point;
     float output_scale;
     int output_zero_point;
+    /* Display label count (includes synthetic "other" for open-set). */
     int num_labels;
+    /* Target classes; 0 = legacy full-softmax over num_labels. */
+    int num_target_labels;
+    /* TFLite output length (emb_dim for prototype, or num targets / labels). */
+    int output_dim;
+    /* Reject as other when max(score) is below this (sigmoid or cosine). */
+    float is_target_threshold;
+    /* Prototype open-set: L2 class means, row-major [num_prototypes * emb_dim]. */
+    int emb_dim;
+    int num_prototypes;
+    const float *prototypes;
 } sound_model_params_t;
 
 typedef struct {
@@ -72,7 +83,15 @@ int sound_pipeline_pcm16_to_input(
     int tflite_input_bytes
 );
 
-/** Decode int8 TFLite output logits to class index and confidence. */
+/** Decode int8 TFLite output to class index and confidence.
+
+ * Legacy closed-set: argmax over num_labels softmax probs.
+ * Prototype open-set (prototypes set and output_dim == emb_dim):
+ *   cosine sim to each prototype; if max(sim) < threshold -> other else argmax.
+ * Sigmoid-ovr open-set (num_target_labels > 0 and output_dim == num_target_labels):
+ *   if max(sigmoid) < threshold -> other else argmax.
+ * Legacy dual-head (output_dim == num_target_labels+1): last is P(is_target).
+ */
 int sound_pipeline_decode_output(
     const sound_model_params_t *params,
     const int8_t *tflite_output,

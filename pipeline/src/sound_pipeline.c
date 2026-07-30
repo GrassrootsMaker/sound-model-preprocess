@@ -2,8 +2,14 @@
 
 #include "sound_pipeline.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
+
+/* Stack buffer for dequantized embedding (prototype decode). */
+#ifndef SP_PROTO_EMB_MAX
+#define SP_PROTO_EMB_MAX 64
+#endif
 
 #define SP_ERR_NULL (-3)
 #define SP_ERR_SIZE (-4)
@@ -213,26 +219,174 @@ int sound_pipeline_decode_output(
     int *label_index,
     float *confidence
 ) {
+    int n_out;
+    int n_tgt;
+    int openset_proto;
+    int openset_sigmoid;
+    int openset_dual;
+    int i;
+    int k;
+    int best;
+    float best_v;
+    float is_target;
+    float v;
+    float emb[SP_PROTO_EMB_MAX];
+    float norm;
+    float inv_norm;
+    float sim;
+    int emb_dim;
+    int n_proto;
+    const float *proto;
+
     if (!params || !tflite_output || !label_index) {
         return SF_ERR_NULL_PTR;
     }
-    if (tflite_output_bytes < params->num_labels) {
+
+    n_out = params->output_dim > 0 ? params->output_dim : params->num_labels;
+    if (tflite_output_bytes < n_out) {
         return SP_ERR_SIZE;
     }
 
-    /* Model ends in Softmax, so the output tensor already holds probabilities.
-     * Use max-probability confidence directly (do NOT re-softmax, which would
-     * squash a confident ~0.9 down to ~0.4 and trip the confidence gate).
-     */
-    *label_index = sf_argmax_int8_prob(
-        tflite_output,
-        params->num_labels,
+    n_tgt = params->num_target_labels;
+    emb_dim = params->emb_dim;
+    n_proto = params->num_prototypes;
+    proto = params->prototypes;
+
+    /* Prototype: embedding length == emb_dim, class means provided. */
+    openset_proto = (n_tgt > 0 &&
+                     proto != 0 &&
+                     emb_dim > 0 &&
+                     n_proto > 0 &&
+                     n_out == emb_dim);
+    /* Legacy: N independent sigmoids. Dual-head: N softmax + is_target. */
+    openset_sigmoid = (!openset_proto && n_tgt > 0 && n_out == n_tgt);
+    openset_dual = (!openset_proto && n_tgt > 0 && n_out == n_tgt + 1);
+
+    if (openset_proto) {
+        if (emb_dim > SP_PROTO_EMB_MAX) {
+            return SF_ERR_INVALID_CONFIG;
+        }
+        if (n_proto > n_tgt && n_tgt > 0) {
+            n_proto = n_tgt;
+        }
+
+        norm = 0.0f;
+        for (i = 0; i < emb_dim; i++) {
+            emb[i] = sf_dequantize_int8(
+                tflite_output[i],
+                params->output_scale,
+                params->output_zero_point
+            );
+            norm += emb[i] * emb[i];
+        }
+        norm = sqrtf(norm);
+        if (norm < 1e-8f) {
+            *label_index = n_tgt; /* empty embedding -> other */
+            if (confidence) {
+                *confidence = 0.0f;
+            }
+            return 0;
+        }
+        inv_norm = 1.0f / norm;
+        for (i = 0; i < emb_dim; i++) {
+            emb[i] *= inv_norm;
+        }
+
+        best = 0;
+        best_v = -2.0f;
+        for (k = 0; k < n_proto; k++) {
+            sim = 0.0f;
+            for (i = 0; i < emb_dim; i++) {
+                sim += emb[i] * proto[k * emb_dim + i];
+            }
+            if (sim > best_v) {
+                best_v = sim;
+                best = k;
+            }
+        }
+
+        if (params->is_target_threshold > 0.0f &&
+            best_v < params->is_target_threshold) {
+            *label_index = n_tgt; /* synthetic "other" */
+            if (confidence) {
+                *confidence = best_v;
+            }
+            return 0;
+        }
+        *label_index = best;
+        if (confidence) {
+            *confidence = best_v;
+        }
+        return 0;
+    }
+
+    if (!openset_sigmoid && !openset_dual) {
+        /* Legacy closed-set softmax over num_labels. */
+        *label_index = sf_argmax_int8_prob(
+            tflite_output,
+            params->num_labels,
+            params->output_scale,
+            params->output_zero_point,
+            confidence
+        );
+        if (*label_index < 0) {
+            return SF_ERR_INVALID_CONFIG;
+        }
+        return 0;
+    }
+
+    best = 0;
+    best_v = sf_dequantize_int8(
+        tflite_output[0],
         params->output_scale,
-        params->output_zero_point,
-        confidence
+        params->output_zero_point
     );
-    if (*label_index < 0) {
-        return SF_ERR_INVALID_CONFIG;
+    for (i = 1; i < n_tgt; i++) {
+        v = sf_dequantize_int8(
+            tflite_output[i],
+            params->output_scale,
+            params->output_zero_point
+        );
+        if (v > best_v) {
+            best_v = v;
+            best = i;
+        }
+    }
+
+    if (openset_sigmoid) {
+        /* One-vs-rest: reject when no sigmoid clears the threshold. */
+        if (params->is_target_threshold > 0.0f &&
+            best_v < params->is_target_threshold) {
+            *label_index = n_tgt; /* synthetic "other" */
+            if (confidence) {
+                *confidence = best_v;
+            }
+            return 0;
+        }
+        *label_index = best;
+        if (confidence) {
+            *confidence = best_v;
+        }
+        return 0;
+    }
+
+    /* Legacy dual-head: last output is P(is_target). */
+    is_target = sf_dequantize_int8(
+        tflite_output[n_tgt],
+        params->output_scale,
+        params->output_zero_point
+    );
+    if (params->is_target_threshold > 0.0f &&
+        is_target < params->is_target_threshold) {
+        *label_index = n_tgt;
+        if (confidence) {
+            *confidence = is_target;
+        }
+        return 0;
+    }
+    *label_index = best;
+    if (confidence) {
+        *confidence = best_v;
     }
     return 0;
 }
