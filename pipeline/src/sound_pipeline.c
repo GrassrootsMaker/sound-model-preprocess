@@ -166,7 +166,6 @@ int sound_pipeline_pcm16_to_input(
 ) {
     const sound_model_params_t *p = &pipe->params;
     const int needed = p->input_frames * p->input_mels;
-    int err;
 
     if (!pipe || !pcm || !tflite_input) {
         return SF_ERR_NULL_PTR;
@@ -176,9 +175,12 @@ int sound_pipeline_pcm16_to_input(
     }
 
 #ifdef SF_EMBEDDED
-    err = sf_compute_log_mel_pcm16(&pipe->feature_ctx, pcm, n_pcm, pipe->mel_buf);
-    if (err < 0) {
-        return err;
+    {
+        int err = sf_compute_log_mel_pcm16(
+            &pipe->feature_ctx, pcm, n_pcm, pipe->mel_buf);
+        if (err < 0) {
+            return err;
+        }
     }
 
     sf_pack_normalize_quantize_int8(

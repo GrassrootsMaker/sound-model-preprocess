@@ -209,7 +209,7 @@ size_t sf_context_buffer_bytes(const sf_config_t *cfg) {
     bytes += sizeof(float) - 1U; /* align before fft_work */
     bytes += sf_fft_work_bytes(cfg->n_fft);
     bytes += (size_t)n_freq_bins * sizeof(float);
-  (void)n_frames;
+    (void)n_frames;
     (void)n_samples; /* unused when SF_EMBEDDED drops the waveform buffer */
     return bytes;
 }
